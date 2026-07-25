@@ -7,6 +7,8 @@ import React, { useState, useEffect, useRef } from "react";
    - 入力: A案（配偶者/子/財産概算/不動産割合の4項目）。
    - 計算: 明示ルールの機械計算のみ（AIには計算させない）。
    - 結果: 概算"試算額"として枠付け。課題は③構文（該当可能性→専門家へ）。
+   - AI総評: 機械計算済みの結果を /api/comment に渡し、③構文の総評を1本生成。
+     （計算はさせない。氏名・メール等の個人情報は渡さない。）
    - 追加入力ボタンは次版のダミー入口（＝メール取得フックの想定位置）。
    ========================================================================= */
 
@@ -408,6 +410,57 @@ function Diagnosing({ onDone }) {
   );
 }
 
+// ---- AI評価コメント（結果を /api/comment に渡し③構文の総評を1本表示）----
+// ・送るのは機械計算済みの診断値のみ。氏名・メール等の個人情報は渡さない。
+// ・失敗時は黙って非表示（概算・課題カードは既に出ているので画面は成立する）。
+// ・ローカルの `npm run dev` では /api が動かないため出ません。`vercel dev`
+//   か、デプロイ済みURLで確認してください。
+function AiComment({ result, form }) {
+  const [state, setState] = useState("loading"); // loading | done | error
+  const [text, setText] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/comment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taxable: result.taxable,
+        taxManyen: toManyen(result.totalTax),
+        basicDeductionManyen: toManyen(result.basicDeduction),
+        hasSpouse: form.hasSpouse,
+        numChildren: form.numChildren,
+        realEstate: form.realEstate,
+        issueKeys: (result.issues || []).map((i) => i.key),
+      }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        setText(d.comment || "");
+        setState("done");
+      })
+      .catch(() => {
+        if (alive) setState("error");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (state === "error") return null;
+  return (
+    <div className="ai-comment">
+      <div className="ai-comment-tag">AIによる総評</div>
+      {state === "loading" ? (
+        <p className="ai-comment-loading">コメントを生成しています…</p>
+      ) : (
+        <p className="ai-comment-body">{text}</p>
+      )}
+    </div>
+  );
+}
+
 // ---- 結果 ----
 function ResultView({ result, form, onReset }) {
   const { totalTax, basicDeduction, heirCount, taxable, issues, netAssets } = result;
@@ -488,6 +541,9 @@ function ResultView({ result, form, onReset }) {
           </p>
         </>
       )}
+
+      {/* AIによる総評（③構文・機械計算済みの結果を文章化するだけ） */}
+      <AiComment result={result} form={form} />
 
       <button className="rule-toggle" onClick={() => setShowRule((v) => !v)}>
         {showRule ? "− 計算のルールを閉じる" : "＋ どのルールで計算しているか見る"}
@@ -831,6 +887,18 @@ function StyleTag() {
   border-radius:0 10px 10px 0;padding:14px 16px;margin:0 0 18px;
 }
 .disclaimer-strong em{font-style:normal;font-weight:700;color:var(--navy-deep)}
+
+/* AI総評 */
+.ai-comment{
+  margin:0 0 18px;padding:14px 16px;
+  border:1px dashed var(--brass-soft);border-radius:12px;background:#FCFAF4;
+}
+.ai-comment-tag{
+  font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--brass);margin-bottom:8px;
+}
+.ai-comment-body{font-size:13.5px;line-height:1.85;color:var(--ink);margin:0}
+.ai-comment-loading{font-size:13px;color:var(--ink-soft);margin:0}
+
 .rule-toggle{
   background:none;border:none;color:var(--navy);font-family:var(--gothic);
   font-size:13.5px;font-weight:700;cursor:pointer;padding:4px 0;
