@@ -66,16 +66,19 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: userText }] }],
-        generationConfig: { maxOutputTokens: 300, temperature: 0.4 },
+        // Gemini 3.x系は「思考トークン」も maxOutputTokens を消費するため、
+        // 本文が途中で切れないよう十分な枠(1024)を確保する。
+        generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
       }),
     });
     const data = await r.json();
-    let text =
-      data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+    const cand = data?.candidates?.[0];
+    let text = cand?.content?.parts?.map((p) => p.text || "").join("") || "";
     text = text.trim();
+    const finish = cand?.finishReason;
 
-    // --- ④(断定/個別助言)の保険フィルタ。網に掛かったら固定文へ ---
-    if (!text || isDisallowed(text)) text = fallbackText();
+    // 出力が空 / 途中で切れた(MAX_TOKENS) / ④に触れた → 固定文へ差し替え
+    if (!text || finish === "MAX_TOKENS" || isDisallowed(text)) text = fallbackText();
 
     return res.status(200).json({ comment: text });
   } catch (e) {

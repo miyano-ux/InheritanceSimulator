@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from "react";
    - 入力: A案（配偶者/子/財産概算/不動産割合の4項目）。
    - 計算: 明示ルールの機械計算のみ（AIには計算させない）。
    - 結果: 概算"試算額"として枠付け。課題は③構文（該当可能性→専門家へ）。
-   - AI総評: 機械計算済みの結果を /api/comment に渡し、③構文の総評を1本生成。
+   - AI総評: 「AI診断中」の演出中に /api/comment で生成し、完成してから結果へ遷移。
      （計算はさせない。氏名・メール等の個人情報は渡さない。）
    - 追加入力ボタンは次版のダミー入口（＝メール取得フックの想定位置）。
    ========================================================================= */
@@ -86,6 +86,19 @@ function calcTax({ hasSpouse, numChildren, netAssets }) {
 const toManyen = (yen) => Math.round(yen / 10000);
 const fmt = (n) => n.toLocaleString("ja-JP");
 
+// ---- AI総評APIへ渡すペイロード（個人情報は含めない）----
+function buildCommentPayload(result, form) {
+  return {
+    taxable: result.taxable,
+    taxManyen: toManyen(result.totalTax),
+    basicDeductionManyen: toManyen(result.basicDeduction),
+    hasSpouse: form.hasSpouse,
+    numChildren: form.numChildren,
+    realEstate: form.realEstate,
+    issueKeys: (result.issues || []).map((i) => i.key),
+  };
+}
+
 // ==== 課題カード生成（すべて③構文：該当可能性→確認は専門家へ）====
 function buildIssues({ result, hasSpouse, realEstateRatio, taxable }) {
   const issues = [];
@@ -146,6 +159,7 @@ export default function App() {
     realEstate: null, // 割合バケット: 'low'|'mid'|'high'
   });
   const [result, setResult] = useState(null);
+  const [aiComment, setAiComment] = useState(""); // AI総評（診断中に生成しておく）
 
   const canSubmit =
     form.hasSpouse !== null &&
@@ -172,12 +186,14 @@ export default function App() {
       taxable,
     });
     setResult({ ...r, netAssets, taxable, issues, realEstateRatio });
+    setAiComment("");
     setPhase("diagnosing");
   };
 
   const reset = () => {
     setForm({ hasSpouse: null, numChildren: null, assetsManyen: "", realEstate: null });
     setResult(null);
+    setAiComment("");
     setPhase("intro");
   };
 
@@ -195,11 +211,22 @@ export default function App() {
             onSubmit={runDiagnosis}
           />
         )}
-        {phase === "diagnosing" && (
-          <Diagnosing onDone={() => setPhase("result")} />
+        {phase === "diagnosing" && result && (
+          <Diagnosing
+            payload={buildCommentPayload(result, form)}
+            onDone={(comment) => {
+              setAiComment(comment);
+              setPhase("result");
+            }}
+          />
         )}
         {phase === "result" && result && (
-          <ResultView result={result} form={form} onReset={reset} />
+          <ResultView
+            result={result}
+            form={form}
+            aiComment={aiComment}
+            onReset={reset}
+          />
         )}
         <Footer />
       </div>
@@ -374,22 +401,59 @@ function Choice({ active, onClick, children }) {
   );
 }
 
-// ---- AI診断の見せ方（演出のみ。計算はすでに完了している）----
-function Diagnosing({ onDone }) {
+// ---- AI診断の見せ方 ----
+// 演出を見せつつ、その裏で /api/comment を叩いて総評を生成。
+// 「最低表示時間(MIN_MS)」と「生成完了」の両方がそろってから結果画面へ遷移する。
+// 万一APIが遅い/失敗しても、最大待ち時間(MAX_MS)で総評なしのまま先へ進む。
+function Diagnosing({ payload, onDone }) {
   const steps = [
     "入力内容を確認しています",
     "明示ルールで概算を計算しています",
-    "考えておきたい課題を整理しています",
+    "AIが総評コメントを作成しています",
   ];
   const [i, setI] = useState(0);
+
   useEffect(() => {
-    const t1 = setInterval(() => setI((v) => Math.min(v + 1, steps.length - 1)), 750);
-    const t2 = setTimeout(onDone, 2500);
+    let done = false;
+    const finish = (comment) => {
+      if (!done) {
+        done = true;
+        onDone(comment);
+      }
+    };
+
+    const started = Date.now();
+    const MIN_MS = 2200; // 演出を見せる最低時間
+    const MAX_MS = 12000; // これを超えたら総評なしで先へ
+
+    const maxTimer = setTimeout(() => finish(""), MAX_MS);
+    const stepTimer = setInterval(
+      () => setI((v) => Math.min(v + 1, steps.length - 1)),
+      750
+    );
+
+    fetch("/api/comment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then((r) => r.json())
+      .then((d) => d.comment || "")
+      .catch(() => "") // 失敗時は総評なし（画面は成立する）
+      .then((comment) => {
+        const wait = Math.max(0, MIN_MS - (Date.now() - started));
+        setTimeout(() => {
+          clearTimeout(maxTimer);
+          finish(comment);
+        }, wait);
+      });
+
     return () => {
-      clearInterval(t1);
-      clearTimeout(t2);
+      clearInterval(stepTimer);
+      clearTimeout(maxTimer);
     };
   }, []);
+
   return (
     <section className="diag">
       <div className="diag-orb" aria-hidden="true">
@@ -410,59 +474,8 @@ function Diagnosing({ onDone }) {
   );
 }
 
-// ---- AI評価コメント（結果を /api/comment に渡し③構文の総評を1本表示）----
-// ・送るのは機械計算済みの診断値のみ。氏名・メール等の個人情報は渡さない。
-// ・失敗時は黙って非表示（概算・課題カードは既に出ているので画面は成立する）。
-// ・ローカルの `npm run dev` では /api が動かないため出ません。`vercel dev`
-//   か、デプロイ済みURLで確認してください。
-function AiComment({ result, form }) {
-  const [state, setState] = useState("loading"); // loading | done | error
-  const [text, setText] = useState("");
-
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/comment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        taxable: result.taxable,
-        taxManyen: toManyen(result.totalTax),
-        basicDeductionManyen: toManyen(result.basicDeduction),
-        hasSpouse: form.hasSpouse,
-        numChildren: form.numChildren,
-        realEstate: form.realEstate,
-        issueKeys: (result.issues || []).map((i) => i.key),
-      }),
-    })
-      .then((r) => r.json())
-      .then((d) => {
-        if (!alive) return;
-        setText(d.comment || "");
-        setState("done");
-      })
-      .catch(() => {
-        if (alive) setState("error");
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  if (state === "error") return null;
-  return (
-    <div className="ai-comment">
-      <div className="ai-comment-tag">AIによる総評</div>
-      {state === "loading" ? (
-        <p className="ai-comment-loading">コメントを生成しています…</p>
-      ) : (
-        <p className="ai-comment-body">{text}</p>
-      )}
-    </div>
-  );
-}
-
 // ---- 結果 ----
-function ResultView({ result, form, onReset }) {
+function ResultView({ result, form, aiComment, onReset }) {
   const { totalTax, basicDeduction, heirCount, taxable, issues, netAssets } = result;
   const [showRule, setShowRule] = useState(false);
 
@@ -542,8 +555,13 @@ function ResultView({ result, form, onReset }) {
         </>
       )}
 
-      {/* AIによる総評（③構文・機械計算済みの結果を文章化するだけ） */}
-      <AiComment result={result} form={form} />
+      {/* AIによる総評（診断中に生成済みのものを表示。無ければ枠ごと非表示） */}
+      {aiComment && (
+        <div className="ai-comment">
+          <div className="ai-comment-tag">AIによる総評</div>
+          <p className="ai-comment-body">{aiComment}</p>
+        </div>
+      )}
 
       <button className="rule-toggle" onClick={() => setShowRule((v) => !v)}>
         {showRule ? "− 計算のルールを閉じる" : "＋ どのルールで計算しているか見る"}
@@ -897,7 +915,6 @@ function StyleTag() {
   font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--brass);margin-bottom:8px;
 }
 .ai-comment-body{font-size:13.5px;line-height:1.85;color:var(--ink);margin:0}
-.ai-comment-loading{font-size:13px;color:var(--ink-soft);margin:0}
 
 .rule-toggle{
   background:none;border:none;color:var(--navy);font-family:var(--gothic);
