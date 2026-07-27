@@ -52,6 +52,28 @@ const SEED = [
   },
 ];
 
+// 環境変数の値を GAS のフル /exec URL に正規化する。
+// よくある取り違えを吸収する:
+//   ・デプロイID（AKfycb… ）だけが入っている → macros の /exec URL に補う
+//   ・スキーム（https://）が抜けている       → 補う
+//   ・末尾の /exec が抜けている              → 補う
+//   ・前後の空白・改行                       → 除去
+function normalizeGasUrl(raw) {
+  let u = (raw || "").trim();
+  if (!u) return "";
+  // 素のデプロイID（AKfycb… ）
+  if (/^AKfycb[\w-]+$/.test(u)) {
+    return "https://script.google.com/macros/s/" + u + "/exec";
+  }
+  // スキーム欠け（script.google.com/... で始まる）
+  if (/^script\.google\.com\//i.test(u)) u = "https://" + u;
+  // フルURLだが /exec が抜けている（/macros/s/<id> で終わっている）
+  if (/^https?:\/\/script\.google\.com\/macros\/s\/[\w-]+$/.test(u)) {
+    u = u + "/exec";
+  }
+  return u;
+}
+
 // タイムアウト付き fetch（GASがハングしても関数を落とさない）
 async function fetchWithTimeout(url, options, ms) {
   const controller = new AbortController();
@@ -75,7 +97,7 @@ function extractList(d) {
 export default async function handler(req, res) {
   // ---- どんな例外が起きても 500 を返さない（全体を包む）----
   try {
-    const GAS = (process.env.ACCOUNTANT_GAS_URL || "").trim();
+    const GAS = normalizeGasUrl(process.env.ACCOUNTANT_GAS_URL);
 
     // ===== 一覧取得 =====
     if (req.method === "GET") {
