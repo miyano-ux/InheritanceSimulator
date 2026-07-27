@@ -75,26 +75,100 @@ const planLabel = (key) => (PLANS.find((p) => p.key === key) || {}).label || "";
 // ---- 税理士掲載API（GET一覧 / POST登録・問い合わせ）----
 // いずれも /api/accountants（Vercel関数）を叩く。関数側でGASへプロキシする。
 // ※ ローカル `npm run dev` では /api が無いため一覧は取得できない（デプロイ環境で動く）。
+
+// クライアント側の最終フォールバック（万一 /api に届かなくても一覧を空にしない）。
+// api/accountants.js の SEED と同じ内容。実在の事務所ではないサンプル。
+const CLIENT_SEED = [
+  {
+    id: "cseed-001", plan: "premium", officeName: "大井町相続税理士事務所",
+    name: "田中 誠一", regNumber: "第123456号", area: "品川区・大田区",
+    address: "品川区大井1-2-3", years: 18, cases: 400,
+    specialties: ["realestate", "secondary", "funds"], firstConsultFree: true,
+    feeGuide: "申告報酬 遺産総額の0.5%〜（目安）",
+    message: "相続に不安のあるご家族に寄り添い、まず全体像を分かりやすくご説明します。",
+    photoUrl: "", tel: "",
+  },
+  {
+    id: "cseed-002", plan: "basic", officeName: "しながわ相続支援室",
+    name: "佐藤 洋子", regNumber: "第234567号", area: "品川区",
+    address: "品川区西大井2-4-5", years: 12, cases: 220,
+    specialties: ["secondary", "donation"], firstConsultFree: true,
+    feeGuide: "初回相談 無料 ／ 申告報酬は内容に応じてお見積り",
+    message: "二次相続まで見すえた分け方のご相談を得意としています。",
+    photoUrl: "", tel: "",
+  },
+  {
+    id: "cseed-003", plan: "basic", officeName: "大田・品川相続あんしん税理士法人",
+    name: "鈴木 健太", regNumber: "第345678号", area: "大田区・品川区",
+    address: "大田区蒲田3-6-7", years: 9, cases: 150,
+    specialties: ["funds", "business", "trouble"], firstConsultFree: false,
+    feeGuide: "初回相談 5,500円（60分）",
+    message: "納税資金や遺産分割でお困りの方へ。事業承継もご相談ください。",
+    photoUrl: "", tel: "",
+  },
+];
+
+// 一覧取得。例外を投げず、必ず {ok, accountants, source, status, raw} を返す。
+// ok=false のときも呼び出し側で診断できるよう status/raw を添える。
 async function apiListAccountants() {
-  const r = await fetch("/api/accountants", { method: "GET" });
-  const d = await r.json();
-  return { accountants: d.accountants || [], source: d.source || "" };
+  try {
+    const r = await fetch("/api/accountants", {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    const text = await r.text();
+    let d = null;
+    try { d = JSON.parse(text); } catch (e) { /* JSONでない */ }
+    if (r.ok && d && Array.isArray(d.accountants)) {
+      return { ok: true, accountants: d.accountants, source: d.source || "", status: r.status };
+    }
+    // サーバーには届いたが、200でない or JSONでない（関数未配置/リライト/GAS認証HTML等）
+    return { ok: false, accountants: [], source: "", status: r.status, raw: (text || "").slice(0, 160) };
+  } catch (e) {
+    // /api にそもそも到達できない（ネットワーク or ローカルdev）
+    return { ok: false, accountants: [], source: "", status: 0, raw: String(e) };
+  }
 }
+
 async function apiRegisterAccountant(payload) {
-  const r = await fetch("/api/accountants", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "register", ...payload }),
-  });
-  return r.json();
+  try {
+    const r = await fetch("/api/accountants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "register", ...payload }),
+    });
+    const text = await r.text();
+    try { return JSON.parse(text); } catch (e) { return { ok: false, status: r.status }; }
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
+
 async function apiSendInquiry(payload) {
-  const r = await fetch("/api/accountants", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "inquiry", ...payload }),
-  });
-  return r.json();
+  try {
+    const r = await fetch("/api/accountants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "inquiry", ...payload }),
+    });
+    const text = await r.text();
+    try { return JSON.parse(text); } catch (e) { return { ok: true }; }
+  } catch (e) {
+    return { ok: true }; // 申し込みは画面を止めない（スタブ成功）
+  }
+}
+
+// HTTPステータスから担当者向けの原因ヒントを返す
+function listErrorHint(status) {
+  if (status === 0)
+    return "/api に到達できません。デプロイ済みURLで見ているか（localhostでは /api は動きません）、ネットワークをご確認ください。";
+  if (status === 404)
+    return "/api/accountants が見つかりません（404）。api/accountants.js がデプロイに含まれているか、環境変数追加後に再デプロイしたかをご確認ください。";
+  if (status === 401 || status === 403)
+    return "アクセスが拒否されました。GASのデプロイ設定「アクセスできるユーザー=全員」をご確認ください。";
+  if (status >= 500)
+    return "サーバー側でエラーが発生しています（" + status + "）。ACCOUNTANT_GAS_URL が正しい /exec URL か、GASのデプロイをご確認ください。";
+  return "応答がJSONではありませんでした（status " + status + "）。ACCOUNTANT_GAS_URL の値とGASのデプロイをご確認ください。";
 }
 
 // ---- 相続税の速算表（実装確定時に最新税制を再確認する前提）----
@@ -777,21 +851,29 @@ function ResultView({ result, form, aiComment, onReset, onFindTax }) {
    - 診断結果があれば「得意分野フィルタ」の初期ONを提案するが、操作はEU本人（自己選択）。
    ========================================================================= */
 function AccountantListPage({ form, result, onBack }) {
-  const [state, setState] = useState({ loading: true, error: false, list: [], source: "" });
+  const [state, setState] = useState({ loading: true, error: false, list: [], source: "", diag: null });
   const [activeSpecs, setActiveSpecs] = useState(() => suggestSpecs(form, result));
 
+  const load = () => {
+    setState((s) => ({ ...s, loading: true }));
+    apiListAccountants().then((d) => {
+      if (d.ok) {
+        setState({ loading: false, error: false, list: d.accountants, source: d.source, diag: null });
+      } else {
+        // /api に届かない等でも、顧客提示が止まらないようサンプルを表示しつつ原因を出す
+        setState({
+          loading: false,
+          error: true,
+          list: CLIENT_SEED,
+          source: "client_seed",
+          diag: { status: d.status, hint: listErrorHint(d.status), raw: d.raw },
+        });
+      }
+    });
+  };
+
   useEffect(() => {
-    let alive = true;
-    apiListAccountants()
-      .then((d) => {
-        if (alive) setState({ loading: false, error: false, list: d.accountants, source: d.source });
-      })
-      .catch(() => {
-        if (alive) setState({ loading: false, error: true, list: [], source: "" });
-      });
-    return () => {
-      alive = false;
-    };
+    load();
   }, []);
 
   const toggleSpec = (key) =>
@@ -836,13 +918,21 @@ function AccountantListPage({ form, result, onBack }) {
 
       {state.loading && <div className="tinfo">掲載情報を読み込んでいます…</div>}
 
-      {state.error && (
-        <div className="tinfo tinfo-err">
-          掲載情報を取得できませんでした。時間をおいて再度お試しください。
-          <div className="tinfo-sub">
-            （ローカル開発サーバー <code>npm run dev</code> では /api が動かないため一覧は出ません。
-            デプロイ環境でご確認ください。）
+      {!state.loading && state.error && (
+        <div className="tbanner">
+          <div className="tbanner-h">
+            現在はサンプルを表示しています（掲載データを取得できませんでした）
           </div>
+          <div className="tbanner-b">{state.diag && state.diag.hint}</div>
+          {state.diag && (state.diag.status !== undefined) && (
+            <div className="tbanner-diag">
+              応答: status {state.diag.status}
+              {state.diag.raw ? " ／ " + state.diag.raw : ""}
+            </div>
+          )}
+          <button className="tbanner-retry" onClick={load}>
+            再読み込み
+          </button>
         </div>
       )}
 
@@ -1502,6 +1592,12 @@ function StyleTag() {
 .tnote{font-size:11px;line-height:1.7;color:#8695A2;margin:22px 0 0;padding-top:14px;border-top:1px solid var(--line-soft)}
 .tinfo{text-align:center;color:var(--ink-soft);font-size:14px;padding:26px 12px;background:#F6F8FA;border-radius:12px;margin:8px 0}
 .tinfo-err{color:var(--green);background:#EEF3EF}
+.tbanner{margin:0 0 16px;padding:14px 16px;border-radius:12px;background:#FBF3E4;border:1px solid var(--brass-soft)}
+.tbanner-h{font-size:13.5px;font-weight:700;color:#8A6D33;line-height:1.6}
+.tbanner-b{font-size:12.5px;line-height:1.75;color:var(--ink-soft);margin-top:6px}
+.tbanner-diag{font-size:11px;line-height:1.6;color:#9A855F;margin-top:8px;word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace}
+.tbanner-retry{margin-top:10px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-family:var(--gothic);font-size:12.5px;font-weight:700;padding:8px 16px;cursor:pointer}
+.tbanner-retry:hover{background:var(--navy-deep)}
 .tinfo-sub{font-size:12px;color:#8695A2;margin-top:8px;line-height:1.7}
 .tinfo-sub code{background:#E4EAEF;border-radius:4px;padding:1px 5px;font-size:11px}
 .tlink{background:none;border:none;color:var(--navy);font-family:var(--gothic);font-size:13px;font-weight:700;cursor:pointer;text-decoration:underline;text-underline-offset:3px;padding:6px 2px}
