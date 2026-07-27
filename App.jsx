@@ -120,7 +120,7 @@ async function apiListAccountants() {
     let d = null;
     try { d = JSON.parse(text); } catch (e) { /* JSONでない */ }
     if (r.ok && d && Array.isArray(d.accountants)) {
-      return { ok: true, accountants: d.accountants, source: d.source || "", status: r.status };
+      return { ok: true, accountants: d.accountants, source: d.source || "", note: d.note || "", status: r.status };
     }
     // サーバーには届いたが、200でない or JSONでない（関数未配置/リライト/GAS認証HTML等）
     return { ok: false, accountants: [], source: "", status: r.status, raw: (text || "").slice(0, 160) };
@@ -851,22 +851,43 @@ function ResultView({ result, form, aiComment, onReset, onFindTax }) {
    - 診断結果があれば「得意分野フィルタ」の初期ONを提案するが、操作はEU本人（自己選択）。
    ========================================================================= */
 function AccountantListPage({ form, result, onBack }) {
-  const [state, setState] = useState({ loading: true, error: false, list: [], source: "", diag: null });
+  const [state, setState] = useState({ loading: true, list: [], notice: null });
   const [activeSpecs, setActiveSpecs] = useState(() => suggestSpecs(form, result));
 
   const load = () => {
     setState((s) => ({ ...s, loading: true }));
     apiListAccountants().then((d) => {
-      if (d.ok) {
-        setState({ loading: false, error: false, list: d.accountants, source: d.source, diag: null });
-      } else {
-        // /api に届かない等でも、顧客提示が止まらないようサンプルを表示しつつ原因を出す
+      if (d.ok && d.source === "gas") {
+        // 実データ取得。案内なし。
+        setState({ loading: false, list: d.accountants, notice: null });
+      } else if (d.ok) {
+        // 関数には届いたが、GAS未接続/空/GAS側エラー → サンプル表示＋穏やかな案内
+        const isErr = d.source === "seed_error";
         setState({
           loading: false,
-          error: true,
+          list: d.accountants,
+          notice: {
+            level: isErr ? "error" : "sample",
+            title: isErr
+              ? "現在はサンプルを表示しています（掲載データの取得でエラー）"
+              : "現在はサンプルを表示しています",
+            body: isErr
+              ? "ACCOUNTANT_GAS_URL が正しい /exec か、GASのデプロイ（アクセス=全員）をご確認ください。"
+              : "まだ掲載の登録がないか、接続の準備中です。登録が入ると自動で切り替わります。",
+            diag: d.note || null,
+          },
+        });
+      } else {
+        // /api にそもそも到達できない/非JSON → 担当者向け診断＋サンプルで画面は成立
+        setState({
+          loading: false,
           list: CLIENT_SEED,
-          source: "client_seed",
-          diag: { status: d.status, hint: listErrorHint(d.status), raw: d.raw },
+          notice: {
+            level: "error",
+            title: "現在はサンプルを表示しています（掲載データを取得できませんでした）",
+            body: listErrorHint(d.status),
+            diag: "status " + d.status + (d.raw ? " ／ " + d.raw : ""),
+          },
         });
       }
     });
@@ -918,17 +939,12 @@ function AccountantListPage({ form, result, onBack }) {
 
       {state.loading && <div className="tinfo">掲載情報を読み込んでいます…</div>}
 
-      {!state.loading && state.error && (
-        <div className="tbanner">
-          <div className="tbanner-h">
-            現在はサンプルを表示しています（掲載データを取得できませんでした）
-          </div>
-          <div className="tbanner-b">{state.diag && state.diag.hint}</div>
-          {state.diag && (state.diag.status !== undefined) && (
-            <div className="tbanner-diag">
-              応答: status {state.diag.status}
-              {state.diag.raw ? " ／ " + state.diag.raw : ""}
-            </div>
+      {!state.loading && state.notice && (
+        <div className={"tbanner tbanner-" + state.notice.level}>
+          <div className="tbanner-h">{state.notice.title}</div>
+          <div className="tbanner-b">{state.notice.body}</div>
+          {state.notice.diag && (
+            <div className="tbanner-diag">{state.notice.diag}</div>
           )}
           <button className="tbanner-retry" onClick={load}>
             再読み込み
@@ -936,7 +952,7 @@ function AccountantListPage({ form, result, onBack }) {
         </div>
       )}
 
-      {!state.loading && !state.error && filtered.length === 0 && (
+      {!state.loading && filtered.length === 0 && (
         <div className="tinfo">条件に合う掲載が見つかりませんでした。フィルタを外してお試しください。</div>
       )}
 
@@ -1592,8 +1608,12 @@ function StyleTag() {
 .tnote{font-size:11px;line-height:1.7;color:#8695A2;margin:22px 0 0;padding-top:14px;border-top:1px solid var(--line-soft)}
 .tinfo{text-align:center;color:var(--ink-soft);font-size:14px;padding:26px 12px;background:#F6F8FA;border-radius:12px;margin:8px 0}
 .tinfo-err{color:var(--green);background:#EEF3EF}
-.tbanner{margin:0 0 16px;padding:14px 16px;border-radius:12px;background:#FBF3E4;border:1px solid var(--brass-soft)}
-.tbanner-h{font-size:13.5px;font-weight:700;color:#8A6D33;line-height:1.6}
+.tbanner{margin:0 0 16px;padding:14px 16px;border-radius:12px}
+.tbanner-sample{background:#F3F6F9;border:1px solid var(--line)}
+.tbanner-error{background:#FBF3E4;border:1px solid var(--brass-soft)}
+.tbanner-h{font-size:13.5px;font-weight:700;line-height:1.6}
+.tbanner-sample .tbanner-h{color:var(--navy-deep)}
+.tbanner-error .tbanner-h{color:#8A6D33}
 .tbanner-b{font-size:12.5px;line-height:1.75;color:var(--ink-soft);margin-top:6px}
 .tbanner-diag{font-size:11px;line-height:1.6;color:#9A855F;margin-top:8px;word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace}
 .tbanner-retry{margin-top:10px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-family:var(--gothic);font-size:12.5px;font-weight:700;padding:8px 16px;cursor:pointer}
